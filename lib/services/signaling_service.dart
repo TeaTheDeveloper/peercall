@@ -20,7 +20,7 @@ class SignalMessage {
 }
 
 class SignalingService {
-  static const String baseUrl = 'https://php-webrtc.wasmer.app/home';
+  static const String baseUrl = 'http://php-webrtc.unaux.com/home';
   static const Duration pollInterval = Duration(seconds: 1);
 
   final String room;
