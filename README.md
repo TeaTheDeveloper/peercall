@@ -1,6 +1,6 @@
 # PeerCall Flutter
 
-Flutter mobile client for PeerCall, using `flutter_webrtc` for the actual peer-to-peer media connection and the existing PHP server at `https://php-webrtc.wasmer.app/home` for signaling.
+Flutter mobile client for PeerCall, using `flutter_webrtc` for the actual peer-to-peer media connection based on the existing [WebRTC project](https://github.com/TeaTheDeveloper/PHP-WebRTC).
 
 ## Architecture
 
