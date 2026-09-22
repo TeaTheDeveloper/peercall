@@ -1,0 +1,5 @@
+<!-- Add these keys to ios/Runner/Info.plist -->
+<key>NSCameraUsageDescription</key>
+<string>PeerCall uses your camera for video calls.</string>
+<key>NSMicrophoneUsageDescription</key>
+<string>PeerCall uses your microphone for calls.</string>
