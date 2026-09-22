@@ -214,6 +214,32 @@ class _HomeScreenState extends State<HomeScreen> {
     await _webrtc?.addCandidate(candidate);
   }
 
+  Future<void> _leaveRoom({bool silent = false}) async {
+    await _signalSub?.cancel();
+    await _remoteSub?.cancel();
+    await _stateSub?.cancel();
+    _signalSub = null;
+    _remoteSub = null;
+    _stateSub = null;
+    await _signaling?.stop();
+    await _webrtc?.close();
+    _signaling = null;
+    _webrtc = null;
+    _room = null;
+    _calling = false;
+    _inCall = false;
+    _incomingVisible = false;
+    _pendingOffer = null;
+    _localRenderer.srcObject = null;
+    _remoteRenderer.srcObject = null;
+    if (!silent && mounted) {
+      setState(() {
+        _status = 'Ready';
+        _error = null;
+      });
+    }
+  }
+
   Future<void> _hangUp() async {
     await _signaling?.send('leave');
     await _resetCall();

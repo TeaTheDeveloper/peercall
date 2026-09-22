@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'signaling_service.dart';
 
 class WebRtcService {
@@ -48,7 +49,7 @@ class WebRtcService {
   }) async {
     if (_peerConnection != null) return _peerConnection!;
 
-    final pc = await createPeerConnection(_configuration);
+    final pc = await webrtc.createPeerConnection(_configuration);
     _peerConnection = pc;
 
     pc.onIceCandidate = (candidate) {
