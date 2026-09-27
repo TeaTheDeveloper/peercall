@@ -309,7 +309,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _copyInvite() async {
     if (_room == null) return;
-    final invite = 'https://php-webrtc.wasmer.app/home?room=${Uri.encodeComponent(_room!)}';
+    final invite = 'https://php-webrtc.unaux.com/peer-call?room=${Uri.encodeComponent(_room!)}';
     await Clipboard.setData(ClipboardData(text: invite));
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
