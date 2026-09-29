@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 class SignalMessage {
@@ -35,7 +36,7 @@ class SignalMessage {
 
 class SignalingService {
   static const String baseUrl = 'https://php-webrtc.unaux.com/call';
-  static const Duration pollInterval = Duration(seconds: 1);
+  static const Duration pollInterval = Duration(seconds: 5);
 
   final String room;
   final String clientId = _makeClientId();
@@ -72,7 +73,9 @@ class SignalingService {
     if (announceLeave) {
       try {
         await send('leave', {'hostEnded': hostEnded});
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('Failed to announce leave: $e');
+      }
     }
 
     await _messages.close();
@@ -118,6 +121,8 @@ class SignalingService {
         '_': DateTime.now().millisecondsSinceEpoch.toString(),
       });
 
+      debugPrint('Polling signaling server: $uri');
+
       final response = await http.get(uri).timeout(const Duration(seconds: 10));
       if (response.statusCode != 200) return;
 
@@ -132,8 +137,9 @@ class SignalingService {
         if (message.id.isEmpty || !_processedIds.add(message.id)) continue;
         if (!_messages.isClosed) _messages.add(message);
       }
-    } catch (_) {
+    } catch (e) {
       // Temporary network failures are expected; the next poll retries.
+      debugPrint('Signaling poll failed: $e');
     }
   }
 }
