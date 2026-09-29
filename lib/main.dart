@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'screens/home_screen.dart';
 
 void main() {
@@ -22,6 +23,14 @@ class PeerCallApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
+
+        textTheme: GoogleFonts.quicksandTextTheme(
+          ThemeData.dark().textTheme,
+        ),
+                
+        primaryTextTheme: GoogleFonts.quicksandTextTheme(
+          ThemeData.dark().primaryTextTheme,
+        ),
       ),
       home: const HomeScreen(),
     );
