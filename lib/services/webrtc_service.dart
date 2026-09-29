@@ -1,7 +1,7 @@
 import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
-import 'signaling_service.dart';
 
 class WebRtcService {
   static const Map<String, dynamic> _configuration = {
@@ -17,22 +17,26 @@ class WebRtcService {
     'sdpSemantics': 'unified-plan',
   };
 
-  RTCPeerConnection? _peerConnection;
+  RTCPeerConnection? _pc;
   MediaStream? localStream;
   MediaStream? remoteStream;
+
   bool _remoteDescriptionReady = false;
   final List<RTCIceCandidate> _pendingCandidates = [];
   bool _disposed = false;
 
-  final StreamController<MediaStream> _remoteStreamController = StreamController.broadcast();
-  final StreamController<String> _stateController = StreamController.broadcast();
+  final StreamController<MediaStream> _remoteStreamController =
+      StreamController<MediaStream>.broadcast();
+  final StreamController<String> _stateController =
+      StreamController<String>.broadcast();
 
   Stream<MediaStream> get remoteStreams => _remoteStreamController.stream;
   Stream<String> get states => _stateController.stream;
-  RTCPeerConnection? get peerConnection => _peerConnection;
 
   Future<void> initializeLocalMedia() async {
+    if (_disposed) return;
     if (localStream != null) return;
+
     localStream = await navigator.mediaDevices.getUserMedia({
       'audio': true,
       'video': {
@@ -42,36 +46,36 @@ class WebRtcService {
     });
   }
 
-  Future<RTCPeerConnection> createPeerConnection({
+  Future<RTCPeerConnection> _ensurePeerConnection({
     required Future<void> Function(RTCIceCandidate candidate) onIceCandidate,
   }) async {
-    if (_peerConnection != null) return _peerConnection!;
+    if (_pc != null) return _pc!;
 
-    final pc = await webrtc.createPeerConnection(_configuration);
-    _peerConnection = pc;
+    final pc = await createPeerConnection(_configuration);
+    _pc = pc;
 
     pc.onIceCandidate = (candidate) {
-      if (candidate.candidate != null) {
-        onIceCandidate(candidate);
-      }
+      if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
+      onIceCandidate(candidate);
     };
 
     pc.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
-        remoteStream = event.streams.first;
-        if (!_remoteStreamController.isClosed) {
-          _remoteStreamController.add(remoteStream!);
-        }
+      if (event.streams.isEmpty) return;
+      remoteStream = event.streams.first;
+      if (!_remoteStreamController.isClosed) {
+        _remoteStreamController.add(remoteStream!);
       }
     };
 
     pc.onConnectionState = (state) {
+      debugPrint('[WebRTC] connectionState=$state');
       if (!_stateController.isClosed) {
         _stateController.add(state.toString());
       }
     };
 
     pc.onIceConnectionState = (state) {
+      debugPrint('[WebRTC] iceConnectionState=$state');
       if (!_stateController.isClosed) {
         _stateController.add('ICE: ${state.toString()}');
       }
@@ -86,64 +90,83 @@ class WebRtcService {
     return pc;
   }
 
+  /// Creates offer (host side). Call only after local media is ready.
   Future<RTCSessionDescription> createOffer({
     required Future<void> Function(RTCIceCandidate candidate) onIceCandidate,
   }) async {
-    final pc = await createPeerConnection(onIceCandidate: onIceCandidate);
-    final offer = await pc.createOffer({
-      'offerToReceiveAudio': 1,
-      'offerToReceiveVideo': 1,
-    });
+    final pc = await _ensurePeerConnection(onIceCandidate: onIceCandidate);
+
+    final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    return offer;
+
+    // Return current local description (may still gather more ICE via trickle)
+    return await pc.getLocalDescription() ?? offer;
   }
 
+  /// Creates answer (participant side).
   Future<RTCSessionDescription> createAnswer({
     required RTCSessionDescription offer,
     required Future<void> Function(RTCIceCandidate candidate) onIceCandidate,
   }) async {
-    final pc = await createPeerConnection(onIceCandidate: onIceCandidate);
+    final pc = await _ensurePeerConnection(onIceCandidate: onIceCandidate);
+
     await pc.setRemoteDescription(offer);
     _remoteDescriptionReady = true;
     await _flushCandidates();
-    final answer = await pc.createAnswer({
-      'offerToReceiveAudio': 1,
-      'offerToReceiveVideo': 1,
-    });
+
+    final answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    return answer;
+
+    return await pc.getLocalDescription() ?? answer;
   }
 
   Future<void> setAnswer(RTCSessionDescription answer) async {
-    final pc = _peerConnection;
-    if (pc == null) return;
+    final pc = _pc;
+    if (pc == null) {
+      debugPrint('[WebRTC] setAnswer called with no peer connection');
+      return;
+    }
     await pc.setRemoteDescription(answer);
     _remoteDescriptionReady = true;
     await _flushCandidates();
   }
 
   Future<void> addCandidate(RTCIceCandidate candidate) async {
-    final pc = _peerConnection;
+    if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
+
+    final pc = _pc;
     if (pc == null || !_remoteDescriptionReady) {
       _pendingCandidates.add(candidate);
       return;
     }
-    await pc.addCandidate(candidate);
+
+    try {
+      await pc.addCandidate(candidate);
+    } catch (e) {
+      debugPrint('[WebRTC] addCandidate error: $e');
+    }
   }
 
   Future<void> _flushCandidates() async {
-    final pc = _peerConnection;
+    final pc = _pc;
     if (pc == null) return;
-    for (final candidate in List<RTCIceCandidate>.from(_pendingCandidates)) {
-      await pc.addCandidate(candidate);
-    }
+
+    final list = List<RTCIceCandidate>.from(_pendingCandidates);
     _pendingCandidates.clear();
+
+    for (final c in list) {
+      try {
+        await pc.addCandidate(c);
+      } catch (e) {
+        debugPrint('[WebRTC] flush candidate error: $e');
+      }
+    }
   }
 
   Future<void> toggleCamera() async {
     final tracks = localStream?.getVideoTracks();
     if (tracks == null || tracks.isEmpty) return;
-    await tracks.first.switchCamera();
+    await Helper.switchCamera(tracks.first);
   }
 
   Future<void> setVideoEnabled(bool enabled) async {
@@ -161,20 +184,37 @@ class WebRtcService {
   Future<void> close() async {
     if (_disposed) return;
     _disposed = true;
-    for (final track in localStream?.getTracks() ?? <MediaStreamTrack>[]) {
-      track.stop();
+
+    try {
+      for (final t in localStream?.getTracks() ?? <MediaStreamTrack>[]) {
+        await t.stop();
+      }
+      for (final t in remoteStream?.getTracks() ?? <MediaStreamTrack>[]) {
+        await t.stop();
+      }
+    } catch (_) {}
+
+    try {
+      await _pc?.close();
+      await _pc?.dispose();
+    } catch (_) {}
+
+    try {
+      await localStream?.dispose();
+      await remoteStream?.dispose();
+    } catch (_) {}
+
+    if (!_remoteStreamController.isClosed) {
+      await _remoteStreamController.close();
     }
-    for (final track in remoteStream?.getTracks() ?? <MediaStreamTrack>[]) {
-      track.stop();
+    if (!_stateController.isClosed) {
+      await _stateController.close();
     }
-    await _peerConnection?.close();
-    await _peerConnection?.dispose();
-    await localStream?.dispose();
-    await remoteStream?.dispose();
-    await _remoteStreamController.close();
-    await _stateController.close();
-    _peerConnection = null;
+
+    _pc = null;
     localStream = null;
     remoteStream = null;
+    _pendingCandidates.clear();
+    _remoteDescriptionReady = false;
   }
 }

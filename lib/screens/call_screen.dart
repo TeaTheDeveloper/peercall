@@ -92,16 +92,6 @@ class _CallScreenState extends State<CallScreen> {
                             letterSpacing: -0.5,
                           ),
                         ),
-                        const Spacer(),
-                        IconButton(
-                          onPressed: _handleBack,
-                          tooltip: session.isMinimizable ? 'Minimize call' : 'Close call',
-                          icon: Icon(
-                            session.isMinimizable
-                                ? Icons.picture_in_picture_alt_rounded
-                                : Icons.close_rounded,
-                          ),
-                        ),
                       ],
                     ),
                   ),
