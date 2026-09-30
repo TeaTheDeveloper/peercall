@@ -80,6 +80,15 @@ class CallSession extends ChangeNotifier {
     _remoteSub = webrtc.remoteStreams.listen((stream) {
       if (_closed) return;
       try {
+        final videoTracks = stream.getVideoTracks().length;
+        final audioTracks = stream.getAudioTracks().length;
+
+        debugPrint(
+          '[Call] Remote stream received '
+          'videoTracks=$videoTracks '
+          'audioTracks=$audioTracks',
+        );
+
         remoteRenderer.srcObject = stream;
       } catch (e) {
         debugPrint('[Call] remote srcObject failed: $e');
@@ -94,20 +103,38 @@ class CallSession extends ChangeNotifier {
 
     _stateSub = webrtc.states.listen((state) {
       if (_closed) return;
+
       final lower = state.toLowerCase();
-      if (lower.contains('connected')) {
-        inCall = true;
-        calling = false;
-        status = 'Connected';
-      } else if (lower.contains('failed')) {
-        inCall = false;
-        calling = false;
-        status = 'Connection failed';
-      } else if (lower.contains('connecting') ||
-          lower.contains('checking') ||
-          lower.contains('new')) {
-        if (!inCall) status = 'Connecting...';
+
+      // Only the actual RTCPeerConnection state can drive the
+      // connection lifecycle. ICE "connected" alone does not mean
+      // that remote media has reached the renderer.
+      if (lower.startsWith('pc:')) {
+        if (lower.contains('connected')) {
+          // Stay on "Connecting..." until onTrack attaches remote media.
+          if (!inCall) {
+            status = 'Connecting...';
+          }
+        } else if (lower.contains('failed')) {
+          inCall = false;
+          calling = false;
+          status = 'Connection failed';
+        } else if (lower.contains('connecting') ||
+            lower.contains('checking') ||
+            lower.contains('new')) {
+          if (!inCall) status = 'Connecting...';
+        }
+      } else if (lower.startsWith('ice:')) {
+        if (lower.contains('failed')) {
+          inCall = false;
+          calling = false;
+          status = 'Connection failed';
+        } else if (lower.contains('checking') ||
+            lower.contains('new')) {
+          if (!inCall) status = 'Connecting...';
+        }
       }
+
       notifyListeners();
     });
   }

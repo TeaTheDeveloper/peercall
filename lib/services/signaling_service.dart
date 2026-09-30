@@ -30,7 +30,8 @@ class SignalMessage {
       event: json['event']?.toString() ?? '',
       data: json['data'],
       client: json['client']?.toString() ?? '',
-      target: json['target']?.toString(),
+      // The web app uses `to`; keep `target` as a compatibility fallback.
+      target: json['to']?.toString() ?? json['target']?.toString(),
       time: int.tryParse(json['time']?.toString() ?? ''),
     );
   }
@@ -205,6 +206,10 @@ class SignalingService {
     final bodyMap = {
       'event': event,
       'data': data,
+
+      // `to` is the current signaling field used by the web app.
+      // Keep `target` too so older server code remains compatible.
+      'to': target,
       'target': target,
     };
 

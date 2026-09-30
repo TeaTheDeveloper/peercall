@@ -20,6 +20,7 @@ class WebRtcService {
   RTCPeerConnection? _pc;
   MediaStream? localStream;
   MediaStream? remoteStream;
+  MediaStream? _fallbackRemoteStream;
 
   bool _remoteDescriptionReady = false;
   final List<RTCIceCandidate> _pendingCandidates = [];
@@ -59,42 +60,71 @@ class WebRtcService {
       onIceCandidate(candidate);
     };
 
-    pc.onIceConnectionState = (state) {
-      debugPrint('[WebRTC] iceConnectionState=$state');
-      if (!_stateController.isClosed) {
-        _stateController.add('ICE: ${state.toString()}');
-      }
-      
-      // iceConnectionState is an enum in flutter_webrtc
-      final s = state.toString().toLowerCase();
-      if (s.contains('connected') || s.contains('completed')) {
-        if (!_stateController.isClosed) {
-          _stateController.add('connected');
-        }
-      }
-    };
+    pc.onTrack = (event) async {
+      debugPrint(
+        '[WebRTC] onTrack kind=${event.track.kind} '
+        'streams=${event.streams.length} '
+        'track=${event.track.id}',
+      );
 
-    pc.onTrack = (event) {
-      debugPrint('[WebRTC] onTrack kind=${event.track?.kind} streams=${event.streams.length}');
-      if (event.streams.isEmpty) return;
-      if (remoteStream != null) return;
-      remoteStream = event.streams.first;
-      if (!_remoteStreamController.isClosed) {
-        _remoteStreamController.add(remoteStream!);
+      try {
+        if (event.streams.isNotEmpty) {
+          remoteStream = event.streams.first;
+        } else {
+          // Some native/platform combinations can deliver a track
+          // without a MediaStream in event.streams. Build one so the
+          // renderer still receives the remote track.
+          _fallbackRemoteStream ??=
+              await createLocalMediaStream(
+            'remote_${DateTime.now().millisecondsSinceEpoch}',
+          );
+
+          await _fallbackRemoteStream!.addTrack(
+            event.track,
+          );
+
+          remoteStream = _fallbackRemoteStream;
+        }
+
+        if (remoteStream != null &&
+            !_remoteStreamController.isClosed) {
+          _remoteStreamController.add(
+            remoteStream!,
+          );
+        }
+
+        debugPrint(
+          '[WebRTC] Remote track attached: '
+          '${event.track.kind}',
+        );
+      } catch (e, st) {
+        debugPrint(
+          '[WebRTC] onTrack attach error: $e\n$st',
+        );
       }
     };
 
     pc.onConnectionState = (state) {
-      debugPrint('[WebRTC] connectionState=$state');
+      debugPrint(
+        '[WebRTC] connectionState=$state',
+      );
+
       if (!_stateController.isClosed) {
-        _stateController.add(state.toString());
+        _stateController.add(
+          'PC: ${state.toString()}',
+        );
       }
     };
 
     pc.onIceConnectionState = (state) {
-      debugPrint('[WebRTC] iceConnectionState=$state');
+      debugPrint(
+        '[WebRTC] iceConnectionState=$state',
+      );
+
       if (!_stateController.isClosed) {
-        _stateController.add('ICE: ${state.toString()}');
+        _stateController.add(
+          'ICE: ${state.toString()}',
+        );
       }
     };
 
@@ -242,6 +272,9 @@ class WebRtcService {
     try {
       await localStream?.dispose();
       await remoteStream?.dispose();
+      if (!identical(_fallbackRemoteStream, remoteStream)) {
+        await _fallbackRemoteStream?.dispose();
+      }
     } catch (_) {}
 
     if (!_remoteStreamController.isClosed) {
@@ -254,6 +287,7 @@ class WebRtcService {
     _pc = null;
     localStream = null;
     remoteStream = null;
+    _fallbackRemoteStream = null;
     _pendingCandidates.clear();
     _remoteDescriptionReady = false;
   }
