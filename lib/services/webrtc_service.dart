@@ -59,8 +59,25 @@ class WebRtcService {
       onIceCandidate(candidate);
     };
 
+    pc.onIceConnectionState = (state) {
+      debugPrint('[WebRTC] iceConnectionState=$state');
+      if (!_stateController.isClosed) {
+        _stateController.add('ICE: ${state.toString()}');
+      }
+      
+      // iceConnectionState is an enum in flutter_webrtc
+      final s = state.toString().toLowerCase();
+      if (s.contains('connected') || s.contains('completed')) {
+        if (!_stateController.isClosed) {
+          _stateController.add('connected');
+        }
+      }
+    };
+
     pc.onTrack = (event) {
+      debugPrint('[WebRTC] onTrack kind=${event.track?.kind} streams=${event.streams.length}');
       if (event.streams.isEmpty) return;
+      if (remoteStream != null) return;
       remoteStream = event.streams.first;
       if (!_remoteStreamController.isClosed) {
         _remoteStreamController.add(remoteStream!);
@@ -90,6 +107,27 @@ class WebRtcService {
     return pc;
   }
 
+  Future<void> _waitForIce(RTCPeerConnection pc) async {
+    if (pc.iceGatheringState ==
+        RTCIceGatheringState.RTCIceGatheringStateComplete) {
+      return;
+    }
+    final done = Completer<void>();
+    late void Function(RTCIceGatheringState) handler;
+    handler = (state) {
+      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete &&
+          !done.isCompleted) {
+        done.complete();
+      }
+    };
+    pc.onIceGatheringState = handler;
+    // Safety timeout (same idea as the web’s 5s)
+    await Future.any([
+      done.future,
+      Future<void>.delayed(const Duration(seconds: 5)),
+    ]);
+  }
+
   /// Creates offer (host side). Call only after local media is ready.
   Future<RTCSessionDescription> createOffer({
     required Future<void> Function(RTCIceCandidate candidate) onIceCandidate,
@@ -98,6 +136,7 @@ class WebRtcService {
 
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    await _waitForIce(pc);
 
     // Return current local description (may still gather more ICE via trickle)
     return await pc.getLocalDescription() ?? offer;
@@ -116,6 +155,7 @@ class WebRtcService {
 
     final answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    await _waitForIce(pc);
 
     return await pc.getLocalDescription() ?? answer;
   }

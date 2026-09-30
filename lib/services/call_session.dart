@@ -79,10 +79,16 @@ class CallSession extends ChangeNotifier {
 
     _remoteSub = webrtc.remoteStreams.listen((stream) {
       if (_closed) return;
-      remoteRenderer.srcObject = stream;
+      try {
+        remoteRenderer.srcObject = stream;
+      } catch (e) {
+        debugPrint('[Call] remote srcObject failed: $e');
+        return;
+      }
       inCall = true;
       calling = false;
       status = 'Connected';
+      debugPrint('[Call] Remote stream attached → Connected');
       notifyListeners();
     });
 
