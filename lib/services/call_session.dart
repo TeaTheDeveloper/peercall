@@ -105,10 +105,13 @@ class CallSession extends ChangeNotifier {
       if (_closed) return;
       final lower = state.toLowerCase();
 
+      // Prefer peer-connection / ICE success
       final isConnected =
           lower.contains('connected') || lower.contains('completed');
-      final isFailed =
-          lower.contains('failed') || lower.contains('disconnected');
+
+      // Don't treat brief "disconnected" as hard fail (ICE can flap)
+      final isFailed = lower.contains('failed');
+
       final isConnecting = lower.contains('connecting') ||
           lower.contains('checking') ||
           lower.contains('new');
