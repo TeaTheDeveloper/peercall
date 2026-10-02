@@ -103,36 +103,26 @@ class CallSession extends ChangeNotifier {
 
     _stateSub = webrtc.states.listen((state) {
       if (_closed) return;
-
       final lower = state.toLowerCase();
 
-      // Only the actual RTCPeerConnection state can drive the
-      // connection lifecycle. ICE "connected" alone does not mean
-      // that remote media has reached the renderer.
-      if (lower.startsWith('pc:')) {
-        if (lower.contains('connected')) {
-          // Stay on "Connecting..." until onTrack attaches remote media.
-          if (!inCall) {
-            status = 'Connecting...';
-          }
-        } else if (lower.contains('failed')) {
-          inCall = false;
-          calling = false;
-          status = 'Connection failed';
-        } else if (lower.contains('connecting') ||
-            lower.contains('checking') ||
-            lower.contains('new')) {
-          if (!inCall) status = 'Connecting...';
-        }
-      } else if (lower.startsWith('ice:')) {
-        if (lower.contains('failed')) {
-          inCall = false;
-          calling = false;
-          status = 'Connection failed';
-        } else if (lower.contains('checking') ||
-            lower.contains('new')) {
-          if (!inCall) status = 'Connecting...';
-        }
+      final isConnected =
+          lower.contains('connected') || lower.contains('completed');
+      final isFailed =
+          lower.contains('failed') || lower.contains('disconnected');
+      final isConnecting = lower.contains('connecting') ||
+          lower.contains('checking') ||
+          lower.contains('new');
+
+      if (isFailed) {
+        inCall = false;
+        calling = false;
+        status = 'Connection failed';
+      } else if (isConnected) {
+        calling = false;
+        inCall = true;
+        status = 'Connected';
+      } else if (isConnecting && !inCall) {
+        status = 'Connecting...';
       }
 
       notifyListeners();
