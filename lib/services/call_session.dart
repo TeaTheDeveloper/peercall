@@ -160,20 +160,31 @@ class CallSession extends ChangeNotifier {
   }
 
   Future<void> _handleJoin(SignalMessage message) async {
-    // Only host creates offers, and only for participants
-    if (!isHost || roomEnded || message.client.isEmpty) return;
+    if (roomEnded || message.client.isEmpty) return;
+    if (message.client == signaling.clientId) return;
 
     final data = message.data;
     final role = data is Map ? data['role']?.toString() : null;
-    if (role != 'participant') return;
+    if (role == 'host') {
+      // optional: track host id if you need it
+    }
 
-    // Avoid offering the same peer repeatedly
-    if (_offeredPeers.contains(message.client)) return;
-    _offeredPeers.add(message.client);
+    // Host: always offer to participant
+    if (isHost) {
+      if (role != null && role != 'participant') return;
+      if (_offeredPeers.contains(message.client)) return;
+      _offeredPeers.add(message.client);
+      await createOffer(target: message.client);
+      return;
+    }
 
-    debugPrint(
-        '[Call] Host saw participant join → creating offer for ${message.client}');
-    await createOffer(target: message.client);
+    // Participant: offer only if our clientId is lexicographically smaller
+    if (signaling.clientId.compareTo(message.client) < 0) {
+      if (_offeredPeers.contains(message.client)) return;
+      _offeredPeers.add(message.client);
+      // Need createOffer to work for non-host (remove isHost guard there)
+      await createOffer(target: message.client);
+    }
   }
 
   /// Host starts / restarts an outgoing call toward [target].

@@ -31,6 +31,23 @@ class _HomeScreenState extends State<HomeScreen> {
         '_${random.substring(random.length > 6 ? random.length - 6 : 0)}';
   }
 
+  String? extractRoomId(String input) {
+    input = input.trim();
+    if (input.isEmpty) return null;
+
+    final uri = Uri.tryParse(input);
+    if (uri != null && uri.queryParameters['room'] != null) {
+      input = uri.queryParameters['room']!;
+    } else if (input.contains('room=')) {
+      final q = Uri.splitQueryString(
+          input.contains('?') ? input.split('?').last : input);
+      if (q['room'] != null) input = q['room']!;
+    }
+
+    if (RegExp(r'^[a-zA-Z0-9_-]{3,64}$').hasMatch(input)) return input;
+    return null;
+  }
+
   bool _validRoom(String room) =>
       RegExp(r'^[a-zA-Z0-9_-]{3,64}$').hasMatch(room);
 
@@ -75,8 +92,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _joinRoom() async {
-    final room = _roomController.text.trim();
-    if (!_validRoom(room)) {
+    final room = extractRoomId(_roomController.text.trim());
+    if (!_validRoom(room!)) {
       _showMessage('Enter a valid room ID (3-64 letters, numbers, "_" or "-").');
       return;
     }
