@@ -20,11 +20,14 @@ class CallSession extends ChangeNotifier {
   late WebRtcService webrtc;
 
   final RTCVideoRenderer localRenderer = RTCVideoRenderer();
-  final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
+
+  /// peerId → renderer for that remote stream
+  final Map<String, RTCVideoRenderer> remoteRenderers = {};
 
   StreamSubscription? _signalSub;
   StreamSubscription? _remoteSub;
   StreamSubscription? _stateSub;
+  StreamSubscription? _peerLeftSub;
 
   String status = 'Ready';
   String? error;
@@ -39,16 +42,16 @@ class CallSession extends ChangeNotifier {
 
   RTCSessionDescription? _pendingOffer;
   String? _pendingCallerId;
-  String? _remotePeerId; // the peer we are currently connected / offering to
-  final Set<String> _offeredPeers = {}; // avoid duplicate offers to same peer
+  final Set<String> _offeredPeers = {};
   bool _closed = false;
+
+  List<String> get remotePeerIds => remoteRenderers.keys.toList();
 
   Future<void> initialize() async {
     if (initialized || _closed) return;
     initialized = true;
 
     await localRenderer.initialize();
-    await remoteRenderer.initialize();
 
     _wireWebRtc();
     _signalSub = signaling.messages.listen(_handleSignal);
@@ -76,28 +79,36 @@ class CallSession extends ChangeNotifier {
   void _wireWebRtc() {
     _remoteSub?.cancel();
     _stateSub?.cancel();
+    _peerLeftSub?.cancel();
 
-    _remoteSub = webrtc.remoteStreams.listen((stream) {
+    _remoteSub = webrtc.remoteStreams.listen((entry) async {
       if (_closed) return;
+      final peerId = entry.key;
+      final stream = entry.value;
+
       try {
-        final videoTracks = stream.getVideoTracks().length;
-        final audioTracks = stream.getAudioTracks().length;
-
+        var renderer = remoteRenderers[peerId];
+        if (renderer == null) {
+          renderer = RTCVideoRenderer();
+          await renderer.initialize();
+          remoteRenderers[peerId] = renderer;
+        }
+        renderer.srcObject = stream;
         debugPrint(
-          '[Call] Remote stream received '
-          'videoTracks=$videoTracks '
-          'audioTracks=$audioTracks',
+          '[Call] Remote stream for $peerId '
+          'video=${stream.getVideoTracks().length} '
+          'audio=${stream.getAudioTracks().length}',
         );
-
-        remoteRenderer.srcObject = stream;
       } catch (e) {
-        debugPrint('[Call] remote srcObject failed: $e');
+        debugPrint('[Call] remote srcObject failed peer=$peerId: $e');
         return;
       }
+
       inCall = true;
       calling = false;
-      status = 'Connected';
-      debugPrint('[Call] Remote stream attached → Connected');
+      status = remoteRenderers.length > 1
+          ? '${remoteRenderers.length} connected'
+          : 'Connected';
       notifyListeners();
     });
 
@@ -105,36 +116,59 @@ class CallSession extends ChangeNotifier {
       if (_closed) return;
       final lower = state.toLowerCase();
 
-      // Prefer peer-connection / ICE success
       final isConnected =
           lower.contains('connected') || lower.contains('completed');
-
-      // Don't treat brief "disconnected" as hard fail (ICE can flap)
       final isFailed = lower.contains('failed');
-
       final isConnecting = lower.contains('connecting') ||
           lower.contains('checking') ||
           lower.contains('new');
 
       if (isFailed) {
-        inCall = false;
-        calling = false;
-        status = 'Connection failed';
+        // One peer failed — don't tear down whole call if others remain
+        if (remoteRenderers.isEmpty) {
+          inCall = false;
+          calling = false;
+          status = 'Connection failed';
+        }
       } else if (isConnected) {
         calling = false;
         inCall = true;
-        status = 'Connected';
+        status = remoteRenderers.length > 1
+            ? '${remoteRenderers.length} connected'
+            : 'Connected';
       } else if (isConnecting && !inCall) {
         status = 'Connecting...';
       }
 
       notifyListeners();
     });
+
+    _peerLeftSub = webrtc.peerLeft.listen((peerId) async {
+      await _disposeRemoteRenderer(peerId);
+      _offeredPeers.remove(peerId);
+      if (remoteRenderers.isEmpty) {
+        inCall = false;
+        status = 'Peer left';
+      } else {
+        status = remoteRenderers.length > 1
+            ? '${remoteRenderers.length} connected'
+            : 'Connected';
+      }
+      notifyListeners();
+    });
+  }
+
+  Future<void> _disposeRemoteRenderer(String peerId) async {
+    final r = remoteRenderers.remove(peerId);
+    if (r == null) return;
+    try {
+      r.srcObject = null;
+      await r.dispose();
+    } catch (_) {}
   }
 
   Future<void> _handleSignal(SignalMessage message) async {
     if (_closed) return;
-    // Server already filters own messages, but be safe
     if (message.client == signaling.clientId) return;
 
     switch (message.event) {
@@ -165,58 +199,58 @@ class CallSession extends ChangeNotifier {
 
     final data = message.data;
     final role = data is Map ? data['role']?.toString() : null;
-    if (role == 'host') {
-      // optional: track host id if you need it
-    }
 
-    // Host: always offer to participant
+    // Host always offers to participants
     if (isHost) {
       if (role != null && role != 'participant') return;
       if (_offeredPeers.contains(message.client)) return;
       _offeredPeers.add(message.client);
+      debugPrint('[Call] Host → offer to ${message.client}');
       await createOffer(target: message.client);
       return;
     }
 
-    // Participant: offer only if our clientId is lexicographically smaller
+    // Mesh: participant offers only if our id < theirs (avoid glare)
     if (signaling.clientId.compareTo(message.client) < 0) {
       if (_offeredPeers.contains(message.client)) return;
       _offeredPeers.add(message.client);
-      // Need createOffer to work for non-host (remove isHost guard there)
-      await createOffer(target: message.client);
+      debugPrint('[Call] Mesh offer ${signaling.clientId} → ${message.client}');
+      await createOffer(target: message.client, mesh: true);
     }
   }
 
-  /// Host starts / restarts an outgoing call toward [target].
-  Future<void> createOffer({String? target}) async {
-    if (!isHost || roomEnded || _closed) return;
+  /// [mesh] allows non-host to create offers for participant–participant links.
+  Future<void> createOffer({String? target, bool mesh = false}) async {
+    if (roomEnded || _closed) return;
+    if (!isHost && !mesh) return;
 
     try {
       error = null;
-      calling = true;
-      status = 'Calling...';
+      if (isHost) {
+        calling = true;
+        status = 'Calling...';
+      } else {
+        status = 'Connecting...';
+      }
       notifyListeners();
 
       await webrtc.initializeLocalMedia();
       localRenderer.srcObject = webrtc.localStream;
 
-      final peerId = target ?? _remotePeerId;
+      final peerId = target;
       if (peerId == null) {
-        // No specific peer yet — just wait for a join (host is already "Calling")
-        debugPrint(
-            '[Call] createOffer called with no target — waiting for join');
+        debugPrint('[Call] createOffer with no target — waiting for join');
         return;
       }
 
-      _remotePeerId = peerId;
-
       final offer = await webrtc.createOffer(
-        onIceCandidate: (candidate) async {
+        peerId: peerId,
+        onIceCandidate: (pid, candidate) async {
           try {
             await signaling.send(
               'candidate',
               _candidateToMap(candidate),
-              peerId,
+              pid,
             );
           } catch (e) {
             debugPrint('[Call] send candidate failed: $e');
@@ -236,21 +270,37 @@ class CallSession extends ChangeNotifier {
   }
 
   Future<void> _handleOffer(SignalMessage message) async {
-    // Ignore offers not meant for us
     if (message.target != null && message.target != signaling.clientId) return;
-    if (inCall || incomingVisible || message.data is! Map) return;
+    if (message.data is! Map) return;
+
+    // Already connected / connecting to this peer — ignore duplicate
+    if (webrtc.peers.containsKey(message.client) &&
+        remoteRenderers.containsKey(message.client)) {
+      return;
+    }
 
     final data = Map<String, dynamic>.from(message.data as Map);
     final sdp = data['sdp']?.toString();
     final type = data['type']?.toString();
     if (sdp == null || type == null) return;
 
-    _pendingOffer = RTCSessionDescription(sdp, type);
-    _pendingCallerId = message.client;
-    _remotePeerId = message.client;
-    incomingVisible = true;
-    status = 'Incoming call...';
-    notifyListeners();
+    final offer = RTCSessionDescription(sdp, type);
+
+    // First offer while idle → show Accept UI (host calling us)
+    // Later mesh offers → auto-answer
+    final isFirst = !inCall && !incomingVisible && remoteRenderers.isEmpty;
+
+    if (isFirst && !isHost) {
+      _pendingOffer = offer;
+      _pendingCallerId = message.client;
+      incomingVisible = true;
+      status = 'Incoming call...';
+      notifyListeners();
+      return;
+    }
+
+    // Auto-answer mesh / subsequent offers
+    await _answerOffer(message.client, offer);
   }
 
   Future<void> acceptCall() async {
@@ -262,18 +312,25 @@ class CallSession extends ChangeNotifier {
     status = 'Connecting...';
     notifyListeners();
 
+    await _answerOffer(callerId, offer);
+    _pendingOffer = null;
+    _pendingCallerId = null;
+  }
+
+  Future<void> _answerOffer(String peerId, RTCSessionDescription offer) async {
     try {
       await webrtc.initializeLocalMedia();
       localRenderer.srcObject = webrtc.localStream;
 
       final answer = await webrtc.createAnswer(
+        peerId: peerId,
         offer: offer,
-        onIceCandidate: (candidate) async {
+        onIceCandidate: (pid, candidate) async {
           try {
             await signaling.send(
               'candidate',
               _candidateToMap(candidate),
-              callerId,
+              pid,
             );
           } catch (e) {
             debugPrint('[Call] send candidate failed: $e');
@@ -281,13 +338,11 @@ class CallSession extends ChangeNotifier {
         },
       );
 
-      await signaling.send('answer', _sdpToMap(answer), callerId);
-      _pendingOffer = null;
-      _pendingCallerId = null;
-      debugPrint('[Call] Answer sent to $callerId');
+      await signaling.send('answer', _sdpToMap(answer), peerId);
+      debugPrint('[Call] Answer sent to $peerId');
     } catch (e, st) {
       error = 'Could not accept the call: $e';
-      debugPrint('CallSession.acceptCall error: $e\n$st');
+      debugPrint('CallSession._answerOffer error: $e\n$st');
       status = 'Error';
       notifyListeners();
     }
@@ -319,8 +374,11 @@ class CallSession extends ChangeNotifier {
     if (sdp == null || type == null) return;
 
     try {
-      await webrtc.setAnswer(RTCSessionDescription(sdp, type));
-      status = 'Connecting...';
+      await webrtc.setAnswer(
+        peerId: message.client,
+        answer: RTCSessionDescription(sdp, type),
+      );
+      if (!inCall) status = 'Connecting...';
       notifyListeners();
       debugPrint('[Call] Answer applied from ${message.client}');
     } catch (e, st) {
@@ -343,93 +401,56 @@ class CallSession extends ChangeNotifier {
       _asInt(map['sdpMLineIndex']),
     );
 
-    try {
-      await webrtc.addCandidate(candidate);
-    } catch (e) {
-      debugPrint('[Call] addCandidate error: $e');
-    }
-  }
-
-  int? _asInt(dynamic value) {
-    if (value is int) return value;
-    return int.tryParse(value?.toString() ?? '');
-  }
-
-  Map<String, dynamic> _sdpToMap(RTCSessionDescription sdp) => {
-        'type': sdp.type,
-        'sdp': sdp.sdp,
-      };
-
-  Map<String, dynamic> _candidateToMap(RTCIceCandidate c) => {
-        'candidate': c.candidate,
-        'sdpMid': c.sdpMid,
-        'sdpMLineIndex': c.sdpMLineIndex,
-      };
-
-  Future<void> _handleDecline(SignalMessage message) async {
-    await _resetConnection(recreateMedia: true);
-    calling = false;
-    status = 'Call declined';
-    notifyListeners();
+    await webrtc.addCandidate(peerId: message.client, candidate: candidate);
   }
 
   Future<void> _handleRemoteLeave(SignalMessage message) async {
     final data = message.data;
-    final hostEnded = data is Map && data['hostEnded'] == true;
+    final hostEnded =
+        data is Map && data['hostEnded'] == true;
 
-    await _resetConnection(recreateMedia: isHost && !hostEnded);
-
-    if (hostEnded && !isHost) {
+    if (hostEnded) {
       roomEnded = true;
-      status = 'Call ended';
-      error = null;
+    }
+
+    await webrtc.closePeer(message.client);
+    await _disposeRemoteRenderer(message.client);
+    _offeredPeers.remove(message.client);
+
+    if (remoteRenderers.isEmpty) {
+      inCall = false;
+      calling = false;
+      status = hostEnded ? 'Host ended the call' : 'Peer left';
     } else {
-      status = 'Peer left';
+      status = remoteRenderers.length > 1
+          ? '${remoteRenderers.length} connected'
+          : 'Connected';
+    }
+    notifyListeners();
+  }
+
+  Future<void> _handleDecline(SignalMessage message) async {
+    await webrtc.closePeer(message.client);
+    await _disposeRemoteRenderer(message.client);
+    _offeredPeers.remove(message.client);
+    if (remoteRenderers.isEmpty) {
+      calling = false;
+      status = 'Call declined';
     }
     notifyListeners();
   }
 
   Future<void> hangUp() async {
+    if (_closed) return;
     try {
       await signaling.send('leave', {'hostEnded': isHost});
     } catch (_) {}
-
-    await _resetConnection(recreateMedia: isHost);
-    calling = false;
-    inCall = false;
-    roomEnded = isHost;
-    status = isHost ? 'Call ended' : 'Waiting for the host to start a call.';
-    notifyListeners();
+    await close();
   }
 
-  Future<void> _resetConnection({required bool recreateMedia}) async {
-    final old = webrtc;
-    remoteRenderer.srcObject = null;
-    // keep local preview if we recreate media
-
-    _pendingOffer = null;
-    _pendingCallerId = null;
-    _remotePeerId = null;
-    _offeredPeers.clear();
-    incomingVisible = false;
-    inCall = false;
-    calling = false;
-
-    await old.close();
-
-    webrtc = WebRtcService();
-    _wireWebRtc();
-
-    if (recreateMedia && !roomEnded && !_closed) {
-      try {
-        await webrtc.initializeLocalMedia();
-        localRenderer.srcObject = webrtc.localStream;
-      } catch (e) {
-        debugPrint('[Call] recreate media failed: $e');
-      }
-    } else {
-      localRenderer.srcObject = null;
-    }
+  Future<void> toggleCamera() async {
+    await webrtc.toggleCamera();
+    notifyListeners();
   }
 
   Future<void> toggleVideo() async {
@@ -444,33 +465,52 @@ class CallSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> flipCamera() => webrtc.toggleCamera();
-
-  bool get isMinimizable => initialized && !roomEnded && !_closed;
+  bool get isMinimizable => inCall && !ended && !_closed;
 
   bool get isActive => inCall;
 
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    ended = true;
 
     await _signalSub?.cancel();
     await _remoteSub?.cancel();
     await _stateSub?.cancel();
+    await _peerLeftSub?.cancel();
 
-    try {
-      await signaling.stop(announceLeave: true, hostEnded: isHost);
-    } catch (_) {}
-    await signaling.dispose();
+    for (final id in remoteRenderers.keys.toList()) {
+      await _disposeRemoteRenderer(id);
+    }
 
-    await webrtc.close();
-
-    // Dispose renderers last
     try {
       localRenderer.srcObject = null;
-      remoteRenderer.srcObject = null;
       await localRenderer.dispose();
-      await remoteRenderer.dispose();
     } catch (_) {}
+
+    await webrtc.close();
+    await signaling.stop(announceLeave: true, hostEnded: isHost);
+
+    inCall = false;
+    calling = false;
+    status = isHost ? 'Call ended' : 'Waiting for the host to start a call.';
+    notifyListeners();
+  }
+
+  Map<String, dynamic> _sdpToMap(RTCSessionDescription sdp) => {
+        'type': sdp.type,
+        'sdp': sdp.sdp,
+      };
+
+  Map<String, dynamic> _candidateToMap(RTCIceCandidate c) => {
+        'candidate': c.candidate,
+        'sdpMid': c.sdpMid,
+        'sdpMLineIndex': c.sdpMLineIndex,
+      };
+
+  int? _asInt(dynamic v) {
+    if (v == null) return null;
+    if (v is int) return v;
+    return int.tryParse(v.toString());
   }
 }

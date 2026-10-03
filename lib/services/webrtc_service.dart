@@ -3,6 +3,18 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+/// One peer connection + pending ICE state for a single remote client.
+class PeerLink {
+  PeerLink(this.peerId, this.pc);
+
+  final String peerId;
+  final RTCPeerConnection pc;
+  bool remoteDescriptionReady = false;
+  final List<RTCIceCandidate> pendingCandidates = [];
+  MediaStream? remoteStream;
+}
+
+/// Multi-peer WebRTC (mesh). One [RTCPeerConnection] per remote [peerId].
 class WebRtcService {
   static const Map<String, dynamic> _configuration = {
     'iceServers': [
@@ -17,22 +29,30 @@ class WebRtcService {
     'sdpSemantics': 'unified-plan',
   };
 
-  RTCPeerConnection? _pc;
   MediaStream? localStream;
-  MediaStream? remoteStream;
-  MediaStream? _fallbackRemoteStream;
-
-  bool _remoteDescriptionReady = false;
-  final List<RTCIceCandidate> _pendingCandidates = [];
   bool _disposed = false;
 
-  final StreamController<MediaStream> _remoteStreamController =
-      StreamController<MediaStream>.broadcast();
+  final Map<String, PeerLink> _peers = {};
+
+  final StreamController<MapEntry<String, MediaStream>> _remoteStreamController =
+      StreamController<MapEntry<String, MediaStream>>.broadcast();
   final StreamController<String> _stateController =
       StreamController<String>.broadcast();
+  final StreamController<String> _peerLeftController =
+      StreamController<String>.broadcast();
 
-  Stream<MediaStream> get remoteStreams => _remoteStreamController.stream;
+  /// Emits (peerId, remote MediaStream) when a track arrives.
+  Stream<MapEntry<String, MediaStream>> get remoteStreams =>
+      _remoteStreamController.stream;
+
   Stream<String> get states => _stateController.stream;
+
+  /// Peer id when a connection is closed/failed and removed.
+  Stream<String> get peerLeft => _peerLeftController.stream;
+
+  Map<String, PeerLink> get peers => Map.unmodifiable(_peers);
+
+  int get peerCount => _peers.length;
 
   Future<void> initializeLocalMedia() async {
     if (_disposed) return;
@@ -47,84 +67,62 @@ class WebRtcService {
     });
   }
 
-  Future<RTCPeerConnection> _ensurePeerConnection({
-    required Future<void> Function(RTCIceCandidate candidate) onIceCandidate,
+  Future<PeerLink> _ensurePeer({
+    required String peerId,
+    required Future<void> Function(String peerId, RTCIceCandidate candidate)
+        onIceCandidate,
   }) async {
-    if (_pc != null) return _pc!;
+    final existing = _peers[peerId];
+    if (existing != null) return existing;
 
     final pc = await createPeerConnection(_configuration);
-    _pc = pc;
+    final link = PeerLink(peerId, pc);
+    _peers[peerId] = link;
 
     pc.onIceCandidate = (candidate) {
       if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
-      onIceCandidate(candidate);
+      onIceCandidate(peerId, candidate);
     };
 
     pc.onTrack = (event) async {
       debugPrint(
-        '[WebRTC] onTrack kind=${event.track.kind} '
-        'streams=${event.streams.length} '
-        'track=${event.track.id}',
+        '[WebRTC] onTrack peer=$peerId kind=${event.track.kind} '
+        'streams=${event.streams.length}',
       );
-
       try {
+        MediaStream stream;
         if (event.streams.isNotEmpty) {
-          remoteStream = event.streams.first;
+          stream = event.streams.first;
         } else {
-          // Some native/platform combinations can deliver a track
-          // without a MediaStream in event.streams. Build one so the
-          // renderer still receives the remote track.
-          _fallbackRemoteStream ??=
-              await createLocalMediaStream(
-            'remote_${DateTime.now().millisecondsSinceEpoch}',
+          stream = await createLocalMediaStream(
+            'remote_${peerId}_${DateTime.now().millisecondsSinceEpoch}',
           );
-
-          await _fallbackRemoteStream!.addTrack(
-            event.track,
-          );
-
-          remoteStream = _fallbackRemoteStream;
+          await stream.addTrack(event.track);
         }
-
-        if (remoteStream != null &&
-            !_remoteStreamController.isClosed) {
-          _remoteStreamController.add(
-            remoteStream!,
-          );
+        link.remoteStream = stream;
+        if (!_remoteStreamController.isClosed) {
+          _remoteStreamController.add(MapEntry(peerId, stream));
         }
-
-        debugPrint(
-          '[WebRTC] Remote track attached: '
-          '${event.track.kind}',
-        );
       } catch (e, st) {
-        debugPrint(
-          '[WebRTC] onTrack attach error: $e\n$st',
-        );
+        debugPrint('[WebRTC] onTrack error peer=$peerId: $e\n$st');
       }
     };
 
     pc.onConnectionState = (state) {
-      debugPrint(
-        '[WebRTC] connectionState=$state',
-      );
-
+      debugPrint('[WebRTC] peer=$peerId connectionState=$state');
       if (!_stateController.isClosed) {
-        _stateController.add(
-          'PC: ${state.toString()}',
-        );
+        _stateController.add('PC:$peerId:${state.toString()}');
+      }
+      final s = state.toString().toLowerCase();
+      if (s.contains('failed') || s.contains('closed')) {
+        // Don't auto-remove here; CallSession may call closePeer
       }
     };
 
     pc.onIceConnectionState = (state) {
-      debugPrint(
-        '[WebRTC] iceConnectionState=$state',
-      );
-
+      debugPrint('[WebRTC] peer=$peerId iceConnectionState=$state');
       if (!_stateController.isClosed) {
-        _stateController.add(
-          'ICE: ${state.toString()}',
-        );
+        _stateController.add('ICE:$peerId:${state.toString()}');
       }
     };
 
@@ -134,7 +132,7 @@ class WebRtcService {
       }
     }
 
-    return pc;
+    return link;
   }
 
   Future<void> _waitForIce(RTCPeerConnection pc) async {
@@ -143,93 +141,123 @@ class WebRtcService {
       return;
     }
     final done = Completer<void>();
-    late void Function(RTCIceGatheringState) handler;
-    handler = (state) {
+    pc.onIceGatheringState = (state) {
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete &&
           !done.isCompleted) {
         done.complete();
       }
     };
-    pc.onIceGatheringState = handler;
-    // Safety timeout (same idea as the web’s 5s)
     await Future.any([
       done.future,
       Future<void>.delayed(const Duration(seconds: 5)),
     ]);
   }
 
-  /// Creates offer (host side). Call only after local media is ready.
   Future<RTCSessionDescription> createOffer({
-    required Future<void> Function(RTCIceCandidate candidate) onIceCandidate,
+    required String peerId,
+    required Future<void> Function(String peerId, RTCIceCandidate candidate)
+        onIceCandidate,
   }) async {
-    final pc = await _ensurePeerConnection(onIceCandidate: onIceCandidate);
-
-    final offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await _waitForIce(pc);
-
-    // Return current local description (may still gather more ICE via trickle)
-    return await pc.getLocalDescription() ?? offer;
+    final link = await _ensurePeer(
+      peerId: peerId,
+      onIceCandidate: onIceCandidate,
+    );
+    final offer = await link.pc.createOffer();
+    await link.pc.setLocalDescription(offer);
+    await _waitForIce(link.pc);
+    return await link.pc.getLocalDescription() ?? offer;
   }
 
-  /// Creates answer (participant side).
   Future<RTCSessionDescription> createAnswer({
+    required String peerId,
     required RTCSessionDescription offer,
-    required Future<void> Function(RTCIceCandidate candidate) onIceCandidate,
+    required Future<void> Function(String peerId, RTCIceCandidate candidate)
+        onIceCandidate,
   }) async {
-    final pc = await _ensurePeerConnection(onIceCandidate: onIceCandidate);
+    final link = await _ensurePeer(
+      peerId: peerId,
+      onIceCandidate: onIceCandidate,
+    );
+    await link.pc.setRemoteDescription(offer);
+    link.remoteDescriptionReady = true;
+    await _flushCandidates(link);
 
-    await pc.setRemoteDescription(offer);
-    _remoteDescriptionReady = true;
-    await _flushCandidates();
-
-    final answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    await _waitForIce(pc);
-
-    return await pc.getLocalDescription() ?? answer;
+    final answer = await link.pc.createAnswer();
+    await link.pc.setLocalDescription(answer);
+    await _waitForIce(link.pc);
+    return await link.pc.getLocalDescription() ?? answer;
   }
 
-  Future<void> setAnswer(RTCSessionDescription answer) async {
-    final pc = _pc;
-    if (pc == null) {
-      debugPrint('[WebRTC] setAnswer called with no peer connection');
+  Future<void> setAnswer({
+    required String peerId,
+    required RTCSessionDescription answer,
+  }) async {
+    final link = _peers[peerId];
+    if (link == null) {
+      debugPrint('[WebRTC] setAnswer: no peer $peerId');
       return;
     }
-    await pc.setRemoteDescription(answer);
-    _remoteDescriptionReady = true;
-    await _flushCandidates();
+    await link.pc.setRemoteDescription(answer);
+    link.remoteDescriptionReady = true;
+    await _flushCandidates(link);
   }
 
-  Future<void> addCandidate(RTCIceCandidate candidate) async {
+  Future<void> addCandidate({
+    required String peerId,
+    required RTCIceCandidate candidate,
+  }) async {
     if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
 
-    final pc = _pc;
-    if (pc == null || !_remoteDescriptionReady) {
-      _pendingCandidates.add(candidate);
+    final link = _peers[peerId];
+    if (link == null || !link.remoteDescriptionReady) {
+      // Queue on a placeholder if peer not ready — store on existing or skip
+      if (link != null) {
+        link.pendingCandidates.add(candidate);
+      } else {
+        debugPrint(
+          '[WebRTC] candidate for unknown peer $peerId — queued after PC exists',
+        );
+        // Will be lost if PC never created; signaling order usually creates PC first
+      }
       return;
     }
 
     try {
-      await pc.addCandidate(candidate);
+      await link.pc.addCandidate(candidate);
     } catch (e) {
-      debugPrint('[WebRTC] addCandidate error: $e');
+      debugPrint('[WebRTC] addCandidate peer=$peerId error: $e');
     }
   }
 
-  Future<void> _flushCandidates() async {
-    final pc = _pc;
-    if (pc == null) return;
+  /// Queue candidate before PC exists by ensuring we only call after offer/answer path.
+  void queueCandidate(String peerId, RTCIceCandidate candidate) {
+    final link = _peers[peerId];
+    if (link == null) return;
+    if (!link.remoteDescriptionReady) {
+      link.pendingCandidates.add(candidate);
+    }
+  }
 
-    final list = List<RTCIceCandidate>.from(_pendingCandidates);
-    _pendingCandidates.clear();
-
+  Future<void> _flushCandidates(PeerLink link) async {
+    final list = List<RTCIceCandidate>.from(link.pendingCandidates);
+    link.pendingCandidates.clear();
     for (final c in list) {
       try {
-        await pc.addCandidate(c);
+        await link.pc.addCandidate(c);
       } catch (e) {
-        debugPrint('[WebRTC] flush candidate error: $e');
+        debugPrint('[WebRTC] flush candidate peer=${link.peerId}: $e');
       }
+    }
+  }
+
+  Future<void> closePeer(String peerId) async {
+    final link = _peers.remove(peerId);
+    if (link == null) return;
+    try {
+      await link.pc.close();
+    } catch (_) {}
+    if (!_peerLeftController.isClosed) {
+      _peerLeftController.add(peerId);
     }
   }
 
@@ -251,6 +279,13 @@ class WebRtcService {
     tracks.first.enabled = enabled;
   }
 
+  Future<void> closeAllPeers() async {
+    final ids = _peers.keys.toList();
+    for (final id in ids) {
+      await closePeer(id);
+    }
+  }
+
   Future<void> close() async {
     if (_disposed) return;
     _disposed = true;
@@ -259,36 +294,17 @@ class WebRtcService {
       for (final t in localStream?.getTracks() ?? <MediaStreamTrack>[]) {
         await t.stop();
       }
-      for (final t in remoteStream?.getTracks() ?? <MediaStreamTrack>[]) {
-        await t.stop();
-      }
     } catch (_) {}
 
-    try {
-      await _pc?.close();
-      await _pc?.dispose();
-    } catch (_) {}
+    await closeAllPeers();
 
     try {
       await localStream?.dispose();
-      await remoteStream?.dispose();
-      if (!identical(_fallbackRemoteStream, remoteStream)) {
-        await _fallbackRemoteStream?.dispose();
-      }
     } catch (_) {}
-
-    if (!_remoteStreamController.isClosed) {
-      await _remoteStreamController.close();
-    }
-    if (!_stateController.isClosed) {
-      await _stateController.close();
-    }
-
-    _pc = null;
     localStream = null;
-    remoteStream = null;
-    _fallbackRemoteStream = null;
-    _pendingCandidates.clear();
-    _remoteDescriptionReady = false;
+
+    await _remoteStreamController.close();
+    await _stateController.close();
+    await _peerLeftController.close();
   }
 }

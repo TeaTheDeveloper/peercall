@@ -256,15 +256,22 @@ class _HomeScreenState extends State<HomeScreen> {
               SizedBox(
                 width: 120,
                 height: 94,
-                child: session.remoteRenderer.srcObject != null
-                    ? RTCVideoView(
-                        session.remoteRenderer,
-                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                      )
-                    : Container(
-                        color: Colors.black,
-                        child: const Icon(Icons.video_call_rounded),
-                      ),
+                child: () {
+                  final withStream = session.remoteRenderers.values
+                      .where((r) => r.srcObject != null)
+                      .toList();
+                  if (withStream.isNotEmpty) {
+                    return RTCVideoView(
+                      withStream.first,
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    );
+                  }
+                  return Container(
+                    color: Colors.black,
+                    child: const Icon(Icons.video_call_rounded),
+                  );
+                }(),
               ),
               const SizedBox(width: 14),
               Expanded(
