@@ -15,8 +15,8 @@ The PHP server does **not** carry the video stream.
 
 The client matches the existing PHP API shape:
 
-- `POST /peer-call?action=send&room=ROOM&client=CLIENT`
-- `GET /peer-call?action=poll&room=ROOM&client=CLIENT`
+- `POST /call?action=send&room=ROOM&client=CLIENT`
+- `GET /call?action=poll&room=ROOM&client=CLIENT`
 
 Polling is intentionally 1 second rather than 500 ms to reduce shared-host/server load. It does not control media latency after WebRTC connects.
 
