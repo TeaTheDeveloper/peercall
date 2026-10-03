@@ -18,7 +18,7 @@ The client matches the existing PHP API shape:
 - `POST /call?action=send&room=ROOM&client=CLIENT`
 - `GET /call?action=poll&room=ROOM&client=CLIENT`
 
-Polling is intentionally 1 second rather than 500 ms to reduce shared-host/server load. It does not control media latency after WebRTC connects.
+Polling is intentionally 3 second rather than 500 ms to reduce shared-host/server load. It does not control media latency after WebRTC connects.
 
 ## Run
 
